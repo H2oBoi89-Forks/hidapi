@@ -107,6 +107,7 @@ extern "C" {
     typedef BOOLEAN (__stdcall *HidD_FreePreparsedData_)(PHIDP_PREPARSED_DATA preparsed_data);
     typedef NTSTATUS (__stdcall *HidP_GetCaps_)(PHIDP_PREPARSED_DATA preparsed_data, HIDP_CAPS *caps);
     typedef BOOLEAN (__stdcall *HidD_SetNumInputBuffers_)(HANDLE handle, ULONG number_buffers);
+    typedef VOID (__stdcall *HidD_GetHidGuid_)(GUID *hidGiud);
 
     static HidD_GetAttributes_ HidD_GetAttributes;
     static HidD_GetSerialNumberString_ HidD_GetSerialNumberString;
@@ -119,6 +120,7 @@ extern "C" {
     static HidD_FreePreparsedData_ HidD_FreePreparsedData;
     static HidP_GetCaps_ HidP_GetCaps;
     static HidD_SetNumInputBuffers_ HidD_SetNumInputBuffers;
+    static HidD_GetHidGuid_ HidD_GetHidGuid;
 
     static HMODULE lib_handle = NULL;
     static BOOLEAN initialized = FALSE;
@@ -209,6 +211,7 @@ static int lookup_functions()
         RESOLVE(HidD_FreePreparsedData);
         RESOLVE(HidP_GetCaps);
         RESOLVE(HidD_SetNumInputBuffers);
+        RESOLVE(HidD_GetHidGuid);
 #undef RESOLVE
     }
     else
@@ -218,21 +221,17 @@ static int lookup_functions()
 }
 #endif
 
-static HANDLE open_device(const char *path, BOOL enumerate)
+static HANDLE open_device(const char *path)
 {
     HANDLE handle;
-    DWORD desired_access = (enumerate)? 0: (GENERIC_WRITE | GENERIC_READ);
-    DWORD share_mode = (enumerate)?
-                          FILE_SHARE_READ|FILE_SHARE_WRITE:
-                          FILE_SHARE_READ;
 
     handle = CreateFileA(path,
-        desired_access,
-        share_mode,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL,
         OPEN_EXISTING,
-        FILE_FLAG_OVERLAPPED,/*FILE_ATTRIBUTE_NORMAL,*/
-        0);
+        FILE_FLAG_OVERLAPPED,
+        NULL);
 
     return handle;
 }
@@ -260,6 +259,110 @@ int HID_API_EXPORT hid_exit(void)
     initialized = FALSE;
 #endif
     return 0;
+}
+
+struct hid_path_info HID_API_EXPORT * HID_API_CALL hid_list_devices(unsigned short vendor_id, unsigned short product_id) {
+    
+    BOOL res = FALSE;
+    GUID hidGuid;
+    struct hid_path_info *list = NULL;
+    struct hid_path_info *device = NULL;
+    HDEVINFO device_info_set;
+    int device_index = 0;
+    SP_DEVICE_INTERFACE_DETAIL_DATA_A *device_interface_detail_data = NULL;
+    SP_DEVICE_INTERFACE_DATA device_interface_data;
+    device_interface_data.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+    char *searchPath;
+
+    searchPath = (char*)calloc(18, sizeof(char));
+
+    sprintf(searchPath, "vid_%04hx&pid_%04hx", vendor_id, product_id);
+    
+    if (hid_init() < 0)
+        return NULL;
+
+    HidD_GetHidGuid(&hidGuid);
+    device_info_set = SetupDiGetClassDevsA(&hidGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+
+
+    while (TRUE) {
+        DWORD required_size = 0;
+
+        res = SetupDiEnumDeviceInterfaces(device_info_set, NULL, &hidGuid, device_index, &device_interface_data);
+
+        if (!res) {
+            break;
+        }
+
+        // first call will fail, we just want to set requiredSize
+        SetupDiGetDeviceInterfaceDetailA(
+            device_info_set,
+            &device_interface_data,
+            NULL,
+            0,
+            &required_size,
+            NULL);
+
+        device_interface_detail_data = (SP_DEVICE_INTERFACE_DETAIL_DATA_A*)malloc(required_size);
+        device_interface_detail_data->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
+
+        res = SetupDiGetDeviceInterfaceDetailA(
+            device_info_set,
+            &device_interface_data,
+            device_interface_detail_data,
+            required_size,
+            NULL,
+            NULL);
+
+        if (res && strstr(device_interface_detail_data->DevicePath, searchPath) != NULL) {
+            const char *str;
+            size_t len;
+            struct hid_path_info *temp;
+            
+            temp = (struct hid_path_info*) calloc(1, sizeof(struct hid_path_info));
+
+            if (device) {
+                device->next = temp;
+            }
+            else {
+                list = temp;
+            }
+            device = temp;
+
+            device->next = NULL;
+            str = device_interface_detail_data->DevicePath;
+            if (str) {
+                len = strlen(str);
+                device->path = (char*)calloc(len + 1, sizeof(char));
+                strncpy(device->path, str, len + 1);
+                device->path[len] = '\0';
+            }
+            else {
+                device->path = NULL;
+            }
+        }
+
+        device_index++;
+    }
+
+    SetupDiDestroyDeviceInfoList(device_info_set);
+
+    free(searchPath);
+
+    return list;
+}
+
+void HID_API_EXPORT HID_API_CALL hid_free_list(struct hid_path_info *devices) {
+    struct hid_path_info *device, *next;
+
+    device = devices;
+
+    while (device) {
+        next = device->next;
+        free(device->path);
+        free(device);
+        device = next;
+    }
 }
 
 struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned short vendor_id, unsigned short product_id)
@@ -365,7 +468,7 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
         //wprintf(L"HandleName: %s\n", device_interface_detail_data->DevicePath);
 
         /* Open a handle to the device */
-        write_handle = open_device(device_interface_detail_data->DevicePath, TRUE);
+        write_handle = open_device(device_interface_detail_data->DevicePath);
 
         /* Check validity of write_handle. */
         if (write_handle == INVALID_HANDLE_VALUE) {
@@ -561,7 +664,7 @@ HID_API_EXPORT hid_device * HID_API_CALL hid_open_path(const char *path)
     dev = new_hid_device();
 
     /* Open a handle to the device */
-    dev->device_handle = open_device(path, FALSE);
+    dev->device_handle = open_device(path);
 
     /* Check validity of write_handle. */
     if (dev->device_handle == INVALID_HANDLE_VALUE) {
@@ -885,53 +988,6 @@ HID_API_EXPORT const wchar_t * HID_API_CALL  hid_error(hid_device *dev)
 #ifdef PICPGM
   unsigned short VendorID = 0x04d8;
   unsigned short ProductID = 0x0033;
-#endif
-
-
-#if 0
-int __cdecl main(int argc, char* argv[])
-{
-    int res;
-    unsigned char buf[65];
-
-    UNREFERENCED_PARAMETER(argc);
-    UNREFERENCED_PARAMETER(argv);
-
-    /* Set up the command buffer. */
-    memset(buf,0x00,sizeof(buf));
-    buf[0] = 0;
-    buf[1] = 0x81;
-    
-
-    /* Open the device. */
-    int handle = open(VendorID, ProductID, L"12345");
-    if (handle < 0)
-        printf("unable to open device\n");
-
-
-    /* Toggle LED (cmd 0x80) */
-    buf[1] = 0x80;
-    res = write(handle, buf, 65);
-    if (res < 0)
-        printf("Unable to write()\n");
-
-    /* Request state (cmd 0x81) */
-    buf[1] = 0x81;
-    write(handle, buf, 65);
-    if (res < 0)
-        printf("Unable to write() (2)\n");
-
-    /* Read requested state */
-    read(handle, buf, 65);
-    if (res < 0)
-        printf("Unable to read()\n");
-
-    /* Print out the returned buffer. */
-    for (int i = 0; i < 4; i++)
-        printf("buf[%d]: %d\n", i, buf[i]);
-
-    return 0;
-}
 #endif
 
 #ifdef __cplusplus
