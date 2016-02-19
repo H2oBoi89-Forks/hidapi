@@ -13,3 +13,5 @@ Release
 .libs
 *.lo
 *.la
+*.sdf
+*.VC.opendb

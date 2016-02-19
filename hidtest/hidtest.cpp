@@ -35,7 +35,7 @@ int main(int argc, char* argv[])
     wchar_t wstr[MAX_STR];
     hid_device *handle;
     const byte REPORT_ID = 0;
-    int i;
+    int i, j;
 
 #ifdef WIN32
     UNREFERENCED_PARAMETER(argc);
@@ -88,8 +88,6 @@ int main(int argc, char* argv[])
             printf("Unable to read product string\n");
         printf("Product String: %ls\n", wstr);
 
-        hid_set_nonblocking(handle, 1);
-
         // clear buffer
         memset(buf, 0x00, sizeof(buf));
 
@@ -118,28 +116,18 @@ int main(int argc, char* argv[])
 
         // clear buffer
         memset(buf, 0x00, sizeof(buf));
-
-        res = 0;
-        while (res == 0) {
-            res = hid_read(handle, buf, sizeof(buf));
-            if (res == 0)
-                printf("waiting...\n");
-            if (res < 0)
-                printf("Unable to read()\n");
-#ifdef WIN32
-            Sleep(500);
-#else
-            usleep(500 * 1000);
-#endif
-        }         
-
-        printf("Data read:\n");
-        // Print out the returned buffer.
-        for (i = 0; i < res; i++)
-            printf("%02hhx ", buf[i]);
-        printf("\n");
-
-        // TODO: blocking read
+                
+        res = hid_read(handle, buf, sizeof(buf));
+        if (res < 0) {
+            printf("Unable to read()\n");
+        }
+        else {
+            printf("Data read:\n");
+            // Print out the returned buffer.
+            for (j = 0; j < res; j++)
+                printf("%02hhx ", buf[j]);
+            printf("\n");
+        }
 
         hid_close(handle);
         handle = NULL;
